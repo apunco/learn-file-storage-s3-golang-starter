@@ -51,6 +51,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	defer file.Close()
 	mediaType, _, err := mime.ParseMediaType(fileHeader.Header.Get("Content-Type"))
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Error parsing mime type", err)
@@ -67,6 +68,10 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	b := make([]byte, 32)
 	_, err = rand.Read(b)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating random bits", err)
+		return
+	}
 
 	encodedfileName := base64.RawURLEncoding.EncodeToString(b)
 	filePath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", encodedfileName, fileExtension))
