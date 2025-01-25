@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -82,9 +85,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
-
 	writer := io.Writer(tempFile)
 	_, err = io.Copy(writer, fileReader)
 	if err != nil {
@@ -93,6 +93,15 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	tempFile.Seek(0, io.SeekStart)
+	ratio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get aspect ration", err)
+		return
+	}
+
+	tempFile.Seek(0, io.SeekStart)
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
 
 	b := make([]byte, 32)
 
@@ -103,6 +112,15 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	fileKey := fmt.Sprintf("%x.%s", b, fileExtension)
+
+	switch ratio {
+	case "16:9":
+		fileKey = fmt.Sprintf("landscape/%s", fileKey)
+	case "9:16":
+		fileKey = fmt.Sprintf("portrait/%s", fileKey)
+	default:
+		fileKey = fmt.Sprintf("other/%s", fileKey)
+	}
 
 	objectInput := s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
@@ -129,4 +147,49 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	respondWithJSON(w, http.StatusOK, s3Output)
 
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", fmt.Errorf("file does not exist at path: %s", filePath)
+	}
+
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("ffprobe error: %v, stderr: %s", err, stderr.String())
+	}
+
+	type Stream struct {
+		Width  int `json:"width"`
+		Height int `json:"height"`
+	}
+
+	type FFProbeOutput struct {
+		Streams []Stream `json:"streams"`
+	}
+
+	vd := FFProbeOutput{}
+	err = json.Unmarshal(stdout.Bytes(), &vd)
+	if err != nil {
+		return "", err
+	}
+
+	width := vd.Streams[0].Width
+	height := vd.Streams[0].Height
+
+	ratio := float64(width) / float64(height)
+	if ratio > 1.7 && ratio < 1.8 {
+		return "16:9", nil
+	} else if ratio > 0.5 && ratio < 0.6 {
+		return "9:16", nil
+	} else {
+		return "other", nil
+	}
 }
